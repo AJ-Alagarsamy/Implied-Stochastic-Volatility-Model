@@ -1,36 +1,36 @@
 import numpy as np
 import pandas as pd
-from scipy.optimize import minimize
 from statsmodels.api import OLS
-from sklearn.kernel_ridge import KernelRidge  # Replacement for LocalLinearRegression
 import matplotlib.pyplot as plt
 
-# ======================
-# 1. Simulate Fake Data
-# ======================
-def simulate_iv_surface(S0=100, r=0.02, d=0.01, days=30, n_strikes=10):
-    """Generate synthetic implied volatility surface data"""
-    np.random.seed(42)
-    strikes = S0 * np.linspace(0.8, 1.2, n_strikes)
-    maturities = np.linspace(15/365, 60/365, 5)
+def input_data_manually():
+    """
+    Input your option data directly in this function.
+    Returns a DataFrame with columns: ['S', 'K', 'tau', 'iv', 'k']
+    """
+    # Example data - REPLACE THIS WITH YOUR ACTUAL DATA
+    # Format: List of [S, K, tau (years), iv]
+    your_data = [
+        [84.75, 95, 0.53972602739, 0.59],
+        [84.75, 95, 0.53972602739, 0.58],
+        [84.75, 95, 0.53972602739, 0.57],
+        [84.75, 95, 0.53972602739, 0.56],
+        [84.75, 95, 0.53972602739, 0.55],
+        [84.75, 95, 0.53972602739, 0.54],
+        [84.75, 95, 0.53972602739, 0.53],
+        [84.75, 95, 0.53972602739, 0.45],
+        [84.75, 95, 0.53972602739, 0.44],
+        [84.75, 95, 0.53972602739, 0.43],
+    ]
     
-    data = []
-    for tau in maturities:
-        for K in strikes:
-            k = np.log(K/S0)
-            # Synthetic IV surface with skew and term structure
-            iv = 0.2 + 0.1*k - 0.3*k**2 + 0.05*tau  
-            data.append([S0, K, tau, k, iv])
+    # Convert to DataFrame
+    df = pd.DataFrame(your_data, columns=['S', 'K', 'tau', 'iv'])
     
-    return pd.DataFrame(data, columns=['S', 'K', 'tau', 'k', 'iv'])
+    # Calculate log-moneyness (k = ln(K/S))
+    df['k'] = np.log(df['K'] / df['S'])
+    
+    return df
 
-df = simulate_iv_surface()
-print("Simulated Option Data:")
-print(df.head())
-
-# ======================
-# 2. Estimate IV Surface Characteristics
-# ======================
 def estimate_iv_features(df):
     """Fit polynomial regression to get Σ_0,0, Σ_0,1, Σ_0,2, Σ_1,0"""
     X = pd.DataFrame({
@@ -50,42 +50,27 @@ def estimate_iv_features(df):
         'S10': model.params['tau'],         # Term structure slope (Σ_1,0)
     }
 
-iv_features = estimate_iv_features(df)
-print("\nEstimated IV Features:")
-for k, v in iv_features.items():
-    print(f"{k}: {v:.4f}")
-
-# ======================
-# 3. Nonparametric ISVM Estimation
-# ======================
-def estimate_svm(iv_features, r=0.02, d=0.01):
-    """Convert IV features to SV model coefficients"""
+def estimate_svm(iv_features, r=0.02, d=0.01, volatility_multiplier=1.0, leverage_multiplier=1.0):
+    """Convert IV features to SV model coefficients with volatility adjustments"""
     S00, S01, S02, S10 = iv_features['S00'], iv_features['S01'], iv_features['S02'], iv_features['S10']
     
-    # γ(v) = 2*Σ_0,0*Σ_0,1
-    gamma = 2 * S00 * S01
+    # γ(v) = 2*Σ_0,0*Σ_0,1 with leverage adjustment
+    gamma = 2 * S00 * S01 * leverage_multiplier
     
-    # η(v) = sqrt[6Σ_0,0³Σ_0,2 + 6γ²] (simplified)
-    eta = np.sqrt(6 * S00**3 * S02 + 6 * gamma**2)
+    # η(v) with volatility multiplier
+    eta = np.sqrt(6 * S00**3 * S02 + 6 * gamma**2) * volatility_multiplier
     
-    # μ(v) simplified calculation
-    mu = 2*S10 - gamma*(d - r + gamma/4)/S00
+    # μ(v) with slower mean reversion
+    mu = (2*S10 - gamma*(d - r + gamma/4)/S00) * 0.7
     
     return {
         'mu': mu,
         'gamma': gamma,
         'eta': eta,
-        'leverage_effect': gamma / np.sqrt(gamma**2 + eta**2)
+        'leverage_effect': gamma / np.sqrt(gamma**2 + eta**2),
+        'volatility_regime': 'high' if volatility_multiplier > 1 else 'normal'
     }
 
-svm_params = estimate_svm(iv_features)
-print("\nEstimated SV Model Parameters:")
-for k, v in svm_params.items():
-    print(f"{k}: {v:.4f}")
-
-# ======================
-# 4. Visualization
-# ======================
 def plot_results(df, iv_features, svm_params):
     fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 5))
     
@@ -109,8 +94,58 @@ def plot_results(df, iv_features, svm_params):
     ax3.bar(params, param_values)
     ax3.set_title("Stochastic Volatility Parameters")
     
+    # Add volatility warning if in high regime
+    if svm_params.get('volatility_regime', 'normal') == 'high':
+        for ax in [ax1, ax2, ax3]:
+            ax.annotate('HIGH VOLATILITY REGIME', 
+                       xy=(0.5, 1.05), 
+                       xycoords='axes fraction',
+                       ha='center', 
+                       color='red',
+                       fontsize=12)
+    
     plt.tight_layout()
-    plt.savefig('isvm_results.png')
     plt.show()
 
-plot_results(df, iv_features, svm_params)
+def main():
+    # ======================
+    # 1. Load Data
+    # ======================
+    print("Loading data...")
+    df = input_data_manually()
+    
+    print("\nOption Data Preview:")
+    print(df.head())
+    
+    # ======================
+    # 2. Estimate IV Surface Characteristics
+    # ======================
+    print("\nEstimating IV features...")
+    iv_features = estimate_iv_features(df)
+    print("\nEstimated IV Features:")
+    for k, v in iv_features.items():
+        print(f"{k}: {v:.4f}")
+    
+    # ======================
+    # 3. Nonparametric ISVM Estimation
+    # ======================
+    print("\nEstimating SV model parameters for volatile market...")
+    svm_params = estimate_svm(
+        iv_features,
+        r=0.02,
+        d=0.01,
+        volatility_multiplier=2.0,  # Double the volatility of volatility
+        leverage_multiplier=1.5     # Increase leverage effect by 50%
+    )
+    print("\nEstimated SV Model Parameters:")
+    for k, v in svm_params.items():
+        print(f"{k}: {v:.4f}")
+    
+    # ======================
+    # 4. Visualization
+    # ======================
+    print("\nGenerating plots...")
+    plot_results(df, iv_features, svm_params)
+
+if __name__ == "__main__":
+    main()
